@@ -96,8 +96,4 @@ the historical protocol; a new study should reserve a separate validation
 set and untouched test set. The release candidate does not include the
 paper's model-inversion attack pipelines or their private evaluators.
 
-The package provides source code and import/fixture checks; it has not been
-validated end-to-end against every private checkpoint and dataset after
-sanitization. Do not claim exact numerical reproduction from this package
-until the full experiments have been rerun. A license should be chosen before
-public release.
+This repository provides the quantization implementation and synthetic smoke tests. Datasets and pretrained checkpoints are not redistributed. Reproducing the reported results requires the data splits, preprocessing, checkpoints, hyperparameters, and evaluation protocol described in the paper. The smoke tests do not validate the paper's numerical results.
