@@ -1,65 +1,85 @@
-# Research code for mixed-precision QDQ quantization
+# Mixed-Precision Quantize-Dequantize (QDQ) Quantization
 
-This directory is a sanitized, local release candidate of the quantization method
-used in the paper. It contains code only: no images, dataset archives, trained
-weights, reconstructions, private filesystem paths, or attack implementations.
-It has **not** been published or uploaded.
+This repository provides the quantization implementation accompanying our
+research on post-training, mixed-precision image classifiers. It supports a
+quantizable ResNet-50 for FaceScrub, Palm, and Iris-Thousand, and quantizable
+ViT-B/16 and Swin-B models for Iris-Thousand. Supply your own dataset and
+matching FP32 checkpoint; neither is distributed here.
 
-## Contents
+The pipeline estimates layer sensitivity, assigns weight and activation bit
+widths under a budget, calibrates activations, and refines quantization
+parameters. Quantization is simulated with floating-point quantize-dequantize
+(QDQ) operations. Reported bit widths do not imply packed low-bit storage,
+native integer inference, or measured speedups.
 
-| File | Purpose |
-| --- | --- |
-| `split_data.py` | Reproducible index-only split helpers and overlap audit |
-| `public_data.py` | User-supplied FaceScrub/Palm/Iris NPZ loaders |
-| `resnet50_mp.py` | Quantizable ResNet-50 architecture and activation QDQ |
-| `transformer_quant_models.py` | Quantizable ViT-B/16 and Swin-B architectures |
-| `public_activation_quantization.py` | Transformer activation-calibration correction |
-| `quantization_core.py` | Shared Fisher, allocation, calibration and refinement code |
-| `run_quantization.py` | Portable entry point with user-provided paths |
+## Files
 
-The method evaluates quantize-dequantize (QDQ) values in floating-point
-arithmetic. It does not pack low-bit weights or use native integer kernels;
-the bit-width reports do not imply measured runtime or storage savings.
+| File                                | Purpose                                                      |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `run_quantization.py`               | Command-line entry point and model/dataset adapters          |
+| `quantization_core.py`              | Sensitivity estimation, bit allocation, calibration, and refinement |
+| `resnet50_mp.py`                    | Quantizable ResNet-50 architecture                           |
+| `transformer_quant_models.py`       | Quantizable ViT-B/16 and Swin-B architectures                |
+| `public_activation_quantization.py` | Transformer activation-calibration support                   |
+| `public_data.py`                    | Loaders for user-supplied NPZ datasets                       |
+| `split_data.py`                     | Split helpers and exact-image overlap checks                 |
+| `test_public_package.py`            | CPU fixture tests without datasets or checkpoints            |
 
-## Data contract
+## Setup
 
-Provide your own uint8 NPZ file in the directory passed as `--dataset_root`:
+Use Python 3.9 or newer and a compatible PyTorch/torchvision installation.
+From this directory, install the listed dependencies:
 
-- FaceScrub: `facescrub_color1.npz` with `actor_images`, `actor_labels`,
-  `actress_images`, and `actress_labels`. The historical loader concatenates
-  the two groups and applies a seed-624 global shuffle followed by an 80/20
-  index split. This is not a class-stratified split.
-- Palm: `palm.npz` with `train_data`, `train_labels`, `test_data`, `test_labels`.
-- Iris-Thousand: `iris_thousand.npz` with the same target-train/test keys.
-  The historical target split has 150 labels (0--149), 2,250 train rows and
-  750 test rows. An optional auxiliary split is neither loaded nor used by
-  the quantization method.
+```bash
+python -m pip install -r requirements.txt
+```
 
-`split_data.py` includes a deterministic classwise function for **new**
-data. It cannot reconstruct the original Palm/Iris raw-image indices from a
-pre-split NPZ. It rejects exact target train/test image overlap on export;
-this stricter rule means newly generated splits may not equal historical ones.
+The code does not download datasets or checkpoints. The FP32 checkpoint must
+match the selected architecture, input channels, image size, and class count.
+The loader accepts a plain state dictionary or a dictionary containing
+`model` or `state_dict`, loads it with `weights_only=True`, and checks model
+keys strictly. Convert other checkpoint formats in a trusted environment.
 
-The FP32 checkpoint must match `--arch`, `--nc`, `--nz`, and `--img_size`.
-The loader uses safe PyTorch loading and requires a strict state-dictionary
-match. Convert checkpoints containing arbitrary pickled objects to a plain
-state dictionary in a trusted environment before using this release.
+## Dataset format
 
-## Environment
+Pass the directory containing the appropriate NPZ file as `--dataset_root`.
+Images must be `uint8`; labels must be integer class IDs compatible with the
+checkpoint's classifier head. Grayscale images should have shape
+`N x H x W` and color images `N x H x W x 3`. Images are not resized by the
+loader, so their spatial size and channel count must match the model
+configuration.
 
-Use a compatible PyTorch/torchvision installation, then install
-`requirements.txt`. No dependency is downloaded automatically by this code.
+| `--dataset`     | NPZ file               | Required arrays                                              |
+| --------------- | ---------------------- | ------------------------------------------------------------ |
+| `facescrub`     | `facescrub_color1.npz` | `actor_images`, `actor_labels`, `actress_images`, `actress_labels` |
+| `palm`          | `palm.npz`             | `train_data`, `train_labels`, `test_data`, `test_labels`     |
+| `iris_thousand` | `iris_thousand.npz`    | `train_data`, `train_labels`, `test_data`, `test_labels`     |
 
-## Example: Iris-Thousand ResNet-50
+The FaceScrub loader concatenates actor and actress arrays, applies a
+seed-624 global shuffle, and uses the first 80% for training and the
+remainder for testing; this is not a class-stratified split. Palm and
+Iris-Thousand loaders use the supplied target train/test arrays as-is. The
+historical Iris-Thousand target split has 150 classes (IDs 0-149), 2,250
+training images, and 750 test images. Auxiliary images are not used by the
+quantization pipeline.
 
-Run from this folder after supplying your own dataset and FP32 weights:
+`split_data.py` provides a deterministic classwise split for **new** datasets.
+It does not reconstruct the historical Palm or Iris-Thousand splits from raw
+images. Its NPZ exporter rejects exact image overlap between target train and
+test splits.
+
+## Run quantization
+
+The following is an illustrative Iris-Thousand ResNet-50 invocation. Replace
+the dataset and checkpoint paths with your own files, and verify that the
+hyperparameters match the experiment you intend to reproduce:
 
 ```bash
 python run_quantization.py \
   --arch resnet50 --dataset iris_thousand \
-  --dataset_root /path/to/your/data \
-  --ckpt_path /path/to/your/fp32_resnet50.pth \
-  --save_dir outputs/iris_resnet50 --save_name type9_w4a4.pth \
+  --dataset_root /path/to/data \
+  --ckpt_path /path/to/fp32_resnet50.pth \
+  --save_dir outputs/iris_resnet50 --save_name quantized_model.pth \
   --nc 1 --nz 150 --img_size 224 \
   --bits 6,5,4,3 --ref_bit 4 \
   --target_avg_w_bit 4 --target_avg_a_bit 4 \
@@ -68,32 +88,30 @@ python run_quantization.py \
   --scale_epochs 100 --label_smoothing 0
 ```
 
-For ViT-B/16 or Swin-B, change `--arch` to `vit` or `swin`, use the matching
-FP32 checkpoint, and explicitly set `--batch_size 4`,
-`--test_batch_size 8`, `--scale_classes_per_batch 4`, and
-`--scale_samples_per_class 2`. The adapter selects
-the architecture's pre-head feature tap. The transformer implementation uses
-the same numerical Fisher/allocation/refinement core while preserving its
-architecture-specific activation QDQ and original-image activation weighting.
-The example is illustrative, not an archived formal preset. For exact
-historical comparison, supply the recorded epoch count, learning-rate
-schedule, bit targets, and checkpoint/data provenance.
+For Iris-Thousand ViT-B/16 or Swin-B, set `--arch vit` or `--arch swin` and
+provide the corresponding FP32 checkpoint. These models require
+`--nc 1 --nz 150 --img_size 224`; choose architecture-appropriate batch
+settings and the learning-rate schedule specified by your experiment. The
+transformer adapter uses the same sensitivity/allocation/refinement core
+while retaining architecture-specific activation QDQ behavior.
 
-Use `--dry_run` to stop after sensitivity estimation. This still loads the
-supplied dataset and model; it does not run without them. All paths are local.
+Use `--dry_run` to stop after sensitivity estimation. It still requires the
+dataset and FP32 checkpoint. Run `python run_quantization.py --help` for all
+available options.
 
-## Local checks
+## Checks and reproducibility
 
-From this directory, run `python -m unittest test_public_package -v`.
-The fixture tests do not use private data or trained weights.
+Run `python -m unittest test_public_package -v` for CPU fixture tests. These
+tests use synthetic inputs and verify the split helpers, imports, and command
+parser; they do not validate the paper's reported numerical results.
 
-## Interpretation and limitations
+The historical pipeline uses the target test split to select the best
+hard-quantized Stage-3 epoch. Its resulting test accuracy is therefore not
+an untouched, selection-free estimate. For a new study, use a separate
+validation set for model selection and preserve an untouched test set.
 
-The original experiments select the best hard-quantized Stage-3 epoch using
-the target test split. Consequently, reported test accuracy is **not** a
-selection-free blind-test estimate. Keep this behavior only when reproducing
-the historical protocol; a new study should reserve a separate validation
-set and untouched test set. The release candidate does not include the
-paper's model-inversion attack pipelines or their private evaluators.
-
-This repository provides the quantization implementation and synthetic smoke tests. Datasets and pretrained checkpoints are not redistributed. Reproducing the reported results requires the data splits, preprocessing, checkpoints, hyperparameters, and evaluation protocol described in the paper. The smoke tests do not validate the paper's numerical results.
+Datasets, trained checkpoints, and model-inversion attack pipelines and their
+independent evaluators are not included. Reproducing reported results requires
+the matching data splits, preprocessing, FP32 checkpoints, hyperparameters,
+and evaluation protocol. The supplied code and synthetic checks alone do not
+establish numerical reproduction of the paper's results.
